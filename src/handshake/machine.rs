@@ -34,72 +34,114 @@ impl<Stream> HandshakeMachine<Stream> {
     pub fn get_mut(&mut self) -> &mut Stream {
         &mut self.stream
     }
+    /// Returns a HandshakeMachine instance wrapping the stream
+    pub fn from_stream(stream: Stream) -> Self {
+        Self { stream, state: HandshakeState::Flushing }
+    }
 }
 
 impl<Stream: Read + Write> HandshakeMachine<Stream> {
     /// Perform a single handshake round.
-    pub fn single_round<Obj: TryParse>(mut self) -> Result<RoundResult<Obj, Stream>> {
+    pub fn single_round<Obj: TryParse>(mut self) -> RoundResult<Obj, Stream> {
         trace!("Doing handshake round.");
         match self.state {
             HandshakeState::Reading(mut buf, mut attack_check) => {
-                let read = buf.read_from(&mut self.stream).no_block()?;
+                let read = buf.read_from(&mut self.stream).no_block();
                 match read {
-                    Some(0) => Err(Error::Protocol(ProtocolError::HandshakeIncomplete)),
-                    Some(count) => {
-                        attack_check.check_incoming_packet_size(count)?;
+                    Err(err) => RoundResult::Error(
+                        Error::Io(err),
+                        HandshakeMachine {
+                            state: HandshakeState::Reading(buf, attack_check),
+                            ..self
+                        },
+                    ),
+                    Ok(Some(0)) => RoundResult::Error(
+                        Error::Protocol(ProtocolError::HandshakeIncomplete),
+                        HandshakeMachine {
+                            state: HandshakeState::Reading(buf, attack_check),
+                            ..self
+                        },
+                    ),
+                    Ok(Some(count)) => {
+                        if let Err(err) = attack_check.check_incoming_packet_size(count) {
+                            return RoundResult::Error(
+                                err,
+                                HandshakeMachine {
+                                    state: HandshakeState::Reading(buf, attack_check),
+                                    ..self
+                                },
+                            );
+                        }
                         // TODO: this is slow for big headers with too many small packets.
                         // The parser has to be reworked in order to work on streams instead
                         // of buffers.
-                        Ok(if let Some((size, obj)) = Obj::try_parse(Buf::chunk(&buf))? {
-                            buf.advance(size);
-                            RoundResult::StageFinished(StageResult::DoneReading {
-                                result: obj,
-                                stream: self.stream,
-                                tail: buf.into_vec(),
-                            })
-                        } else {
-                            RoundResult::Incomplete(HandshakeMachine {
+                        match Obj::try_parse(Buf::chunk(&buf)) {
+                            Err(err) => RoundResult::Error(
+                                err,
+                                HandshakeMachine {
+                                    state: HandshakeState::Reading(buf, attack_check),
+                                    ..self
+                                },
+                            ),
+                            Ok(Some((size, obj))) => {
+                                buf.advance(size);
+                                RoundResult::StageFinished(StageResult::DoneReading {
+                                    result: obj,
+                                    stream: self.stream,
+                                    tail: buf.into_vec(),
+                                })
+                            }
+                            Ok(None) => RoundResult::Incomplete(HandshakeMachine {
                                 state: HandshakeState::Reading(buf, attack_check),
                                 ..self
-                            })
-                        })
+                            }),
+                        }
                     }
-                    None => Ok(RoundResult::WouldBlock(HandshakeMachine {
+                    Ok(None) => RoundResult::WouldBlock(HandshakeMachine {
                         state: HandshakeState::Reading(buf, attack_check),
                         ..self
-                    })),
+                    }),
                 }
             }
             HandshakeState::Writing(mut buf) => {
                 assert!(buf.has_remaining());
-                if let Some(size) = self.stream.write(Buf::chunk(&buf)).no_block()? {
-                    assert!(size > 0);
-                    buf.advance(size);
-                    Ok(if buf.has_remaining() {
-                        RoundResult::Incomplete(HandshakeMachine {
-                            state: HandshakeState::Writing(buf),
-                            ..self
-                        })
-                    } else {
-                        RoundResult::Incomplete(HandshakeMachine {
-                            state: HandshakeState::Flushing,
-                            ..self
-                        })
-                    })
-                } else {
-                    Ok(RoundResult::WouldBlock(HandshakeMachine {
+                match self.stream.write(Buf::chunk(&buf)).no_block() {
+                    Err(err) => RoundResult::Error(
+                        Error::Io(err),
+                        HandshakeMachine { state: HandshakeState::Writing(buf), ..self },
+                    ),
+                    Ok(Some(size)) => {
+                        assert!(size > 0);
+                        buf.advance(size);
+                        if buf.has_remaining() {
+                            RoundResult::Incomplete(HandshakeMachine {
+                                state: HandshakeState::Writing(buf),
+                                ..self
+                            })
+                        } else {
+                            RoundResult::Incomplete(HandshakeMachine {
+                                state: HandshakeState::Flushing,
+                                ..self
+                            })
+                        }
+                    }
+                    Ok(None) => RoundResult::WouldBlock(HandshakeMachine {
                         state: HandshakeState::Writing(buf),
                         ..self
-                    }))
+                    }),
                 }
             }
-            HandshakeState::Flushing => Ok(match self.stream.flush().no_block()? {
-                Some(()) => RoundResult::StageFinished(StageResult::DoneWriting(self.stream)),
-                None => RoundResult::WouldBlock(HandshakeMachine {
+            HandshakeState::Flushing => match self.stream.flush().no_block() {
+                Err(err) => RoundResult::Error(
+                    Error::Io(err),
+                    HandshakeMachine { state: HandshakeState::Flushing, ..self },
+                ),
+                Ok(Some(())) => RoundResult::StageFinished(StageResult::DoneWriting(self.stream)),
+                Ok(None) => RoundResult::WouldBlock(HandshakeMachine {
                     state: HandshakeState::Flushing,
                     ..self
                 }),
-            }),
+            },
         }
     }
 }
@@ -113,6 +155,8 @@ pub enum RoundResult<Obj, Stream> {
     Incomplete(HandshakeMachine<Stream>),
     /// Stage complete.
     StageFinished(StageResult<Obj, Stream>),
+    /// Error
+    Error(Error, HandshakeMachine<Stream>),
 }
 
 /// The result of the stage.

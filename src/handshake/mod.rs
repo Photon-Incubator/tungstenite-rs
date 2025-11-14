@@ -39,15 +39,24 @@ impl<Role: HandshakeRole> MidHandshake<Role> {
     pub fn handshake(mut self) -> Result<Role::FinalResult, HandshakeError<Role>> {
         let mut mach = self.machine;
         loop {
-            mach = match mach.single_round()? {
+            mach = match mach.single_round() {
                 RoundResult::WouldBlock(m) => {
                     return Err(HandshakeError::Interrupted(MidHandshake { machine: m, ..self }))
                 }
                 RoundResult::Incomplete(m) => m,
-                RoundResult::StageFinished(s) => match self.role.stage_finished(s)? {
+                RoundResult::StageFinished(s) => match self.role.stage_finished(s) {
+                    ProcessingResult::Error(err, m) => {
+                        return Err(HandshakeError::Failure(
+                            err,
+                            MidHandshake { machine: m, ..self },
+                        ))
+                    }
                     ProcessingResult::Continue(m) => m,
                     ProcessingResult::Done(result) => return Ok(result),
                 },
+                RoundResult::Error(err, m) => {
+                    return Err(HandshakeError::Failure(err, MidHandshake { machine: m, ..self }))
+                }
             }
         }
     }
@@ -58,14 +67,14 @@ pub enum HandshakeError<Role: HandshakeRole> {
     /// Handshake was interrupted (would block).
     Interrupted(MidHandshake<Role>),
     /// Handshake failed.
-    Failure(Error),
+    Failure(Error, MidHandshake<Role>),
 }
 
 impl<Role: HandshakeRole> fmt::Debug for HandshakeError<Role> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             HandshakeError::Interrupted(_) => write!(f, "HandshakeError::Interrupted(...)"),
-            HandshakeError::Failure(ref e) => write!(f, "HandshakeError::Failure({e:?})"),
+            HandshakeError::Failure(ref e, _) => write!(f, "HandshakeError::Failure({e:?})"),
         }
     }
 }
@@ -74,18 +83,12 @@ impl<Role: HandshakeRole> fmt::Display for HandshakeError<Role> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
             HandshakeError::Interrupted(_) => write!(f, "Interrupted handshake (WouldBlock)"),
-            HandshakeError::Failure(ref e) => write!(f, "{e}"),
+            HandshakeError::Failure(ref e, _) => write!(f, "{e}"),
         }
     }
 }
 
 impl<Role: HandshakeRole> ErrorTrait for HandshakeError<Role> {}
-
-impl<Role: HandshakeRole> From<Error> for HandshakeError<Role> {
-    fn from(err: Error) -> Self {
-        HandshakeError::Failure(err)
-    }
-}
 
 /// Handshake role.
 pub trait HandshakeRole {
@@ -99,7 +102,7 @@ pub trait HandshakeRole {
     fn stage_finished(
         &mut self,
         finish: StageResult<Self::IncomingData, Self::InternalStream>,
-    ) -> Result<ProcessingResult<Self::InternalStream, Self::FinalResult>, Error>;
+    ) -> ProcessingResult<Self::InternalStream, Self::FinalResult>;
 }
 
 /// Stage processing result.
@@ -108,6 +111,7 @@ pub trait HandshakeRole {
 pub enum ProcessingResult<Stream, FinalResult> {
     Continue(HandshakeMachine<Stream>),
     Done(FinalResult),
+    Error(Error, HandshakeMachine<Stream>),
 }
 
 /// Derive the `Sec-WebSocket-Accept` response header from a `Sec-WebSocket-Key` request header.

@@ -73,8 +73,11 @@ pub fn connect_with_config<Req: IntoClientRequest>(
         let client = crate::tls::client_tls_with_config(request, stream, config, None);
 
         client.map_err(|e| match e {
-            HandshakeError::Failure(f) => f,
-            HandshakeError::Interrupted(_) => panic!("Bug: blocking handshake not blocked"),
+            ClientError::HandshakeError(HandshakeError::Failure(f, _)) => f,
+            ClientError::HandshakeError(HandshakeError::Interrupted(_)) => {
+                panic!("Bug: blocking handshake not blocked")
+            }
+            ClientError::WebSocketError(err) => err,
         })
     }
 
@@ -149,6 +152,15 @@ pub fn uri_mode(uri: &Uri) -> Result<Mode> {
     }
 }
 
+#[derive(Debug)]
+/// Client errors
+pub enum ClientError<Stream: Read + Write> {
+    /// Handshake error
+    HandshakeError(HandshakeError<ClientHandshake<Stream>>),
+    /// WebSocket error
+    WebSocketError(Error),
+}
+
 /// Do the client handshake over the given stream given a web socket configuration. Passing `None`
 /// as configuration is equal to calling `client()` function.
 ///
@@ -159,12 +171,19 @@ pub fn client_with_config<Stream, Req>(
     request: Req,
     stream: Stream,
     config: Option<WebSocketConfig>,
-) -> StdResult<(WebSocket<Stream>, Response), HandshakeError<ClientHandshake<Stream>>>
+) -> StdResult<(WebSocket<Stream>, Response), ClientError<Stream>>
 where
     Stream: Read + Write,
     Req: IntoClientRequest,
 {
-    ClientHandshake::start(stream, request.into_client_request()?, config)?.handshake()
+    Ok(ClientHandshake::start(
+        stream,
+        request.into_client_request().map_err(|e| ClientError::WebSocketError(e))?,
+        config,
+    )
+    .map_err(|e| ClientError::WebSocketError(e))?
+    .handshake()
+    .map_err(|e| ClientError::HandshakeError(e))?)
 }
 
 /// Do the client handshake over the given stream.
@@ -175,7 +194,7 @@ where
 pub fn client<Stream, Req>(
     request: Req,
     stream: Stream,
-) -> StdResult<(WebSocket<Stream>, Response), HandshakeError<ClientHandshake<Stream>>>
+) -> StdResult<(WebSocket<Stream>, Response), ClientError<Stream>>
 where
     Stream: Read + Write,
     Req: IntoClientRequest,

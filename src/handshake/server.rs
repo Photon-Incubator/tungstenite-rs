@@ -234,14 +234,22 @@ impl<S: Read + Write, C: Callback> HandshakeRole for ServerHandshake<S, C> {
     fn stage_finished(
         &mut self,
         finish: StageResult<Self::IncomingData, Self::InternalStream>,
-    ) -> Result<ProcessingResult<Self::InternalStream, Self::FinalResult>> {
-        Ok(match finish {
+    ) -> ProcessingResult<Self::InternalStream, Self::FinalResult> {
+        match finish {
             StageResult::DoneReading { stream, result, tail } => {
                 if !tail.is_empty() {
-                    return Err(Error::Protocol(ProtocolError::JunkAfterRequest));
+                    return ProcessingResult::Error(
+                        Error::Protocol(ProtocolError::JunkAfterRequest),
+                        HandshakeMachine::from_stream(stream),
+                    );
                 }
 
-                let response = create_response(&result)?;
+                let response = match create_response(&result) {
+                    Err(err) => {
+                        return ProcessingResult::Error(err, HandshakeMachine::from_stream(stream))
+                    }
+                    Ok(r) => r,
+                };
                 let callback_result = if let Some(callback) = self.callback.take() {
                     callback.on_request(&result, response)
                 } else {
@@ -251,20 +259,33 @@ impl<S: Read + Write, C: Callback> HandshakeRole for ServerHandshake<S, C> {
                 match callback_result {
                     Ok(response) => {
                         let mut output = vec![];
-                        write_response(&mut output, &response)?;
+                        if let Err(err) = write_response(&mut output, &response) {
+                            return ProcessingResult::Error(
+                                err,
+                                HandshakeMachine::from_stream(stream),
+                            );
+                        }
                         ProcessingResult::Continue(HandshakeMachine::start_write(stream, output))
                     }
 
                     Err(resp) => {
                         if resp.status().is_success() {
-                            return Err(Error::Protocol(ProtocolError::CustomResponseSuccessful));
+                            return ProcessingResult::Error(
+                                Error::Protocol(ProtocolError::CustomResponseSuccessful),
+                                HandshakeMachine::from_stream(stream),
+                            );
                         }
 
                         self.error_response = Some(resp);
                         let resp = self.error_response.as_ref().unwrap();
 
                         let mut output = vec![];
-                        write_response(&mut output, resp)?;
+                        if let Err(err) = write_response(&mut output, resp) {
+                            return ProcessingResult::Error(
+                                err,
+                                HandshakeMachine::from_stream(stream),
+                            );
+                        }
 
                         if let Some(body) = resp.body() {
                             output.extend_from_slice(body.as_bytes());
@@ -281,14 +302,17 @@ impl<S: Read + Write, C: Callback> HandshakeRole for ServerHandshake<S, C> {
 
                     let (parts, body) = err.into_parts();
                     let body = body.map(|b| b.as_bytes().to_vec());
-                    return Err(Error::Http(http::Response::from_parts(parts, body).into()));
+                    return ProcessingResult::Error(
+                        Error::Http(http::Response::from_parts(parts, body).into()),
+                        HandshakeMachine::from_stream(stream),
+                    );
                 } else {
                     debug!("Server handshake done.");
                     let websocket = WebSocket::from_raw_socket(stream, Role::Server, self.config);
                     ProcessingResult::Done(websocket)
                 }
             }
-        })
+        }
     }
 }
 

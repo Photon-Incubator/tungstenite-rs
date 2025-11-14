@@ -84,8 +84,8 @@ impl<S: Read + Write> HandshakeRole for ClientHandshake<S> {
     fn stage_finished(
         &mut self,
         finish: StageResult<Self::IncomingData, Self::InternalStream>,
-    ) -> Result<ProcessingResult<Self::InternalStream, Self::FinalResult>> {
-        Ok(match finish {
+    ) -> ProcessingResult<Self::InternalStream, Self::FinalResult> {
+        match finish {
             StageResult::DoneWriting(stream) => {
                 ProcessingResult::Continue(HandshakeMachine::start_read(stream))
             }
@@ -94,9 +94,14 @@ impl<S: Read + Write> HandshakeRole for ClientHandshake<S> {
                     Ok(r) => r,
                     Err(Error::Http(mut e)) => {
                         *e.body_mut() = Some(tail);
-                        return Err(Error::Http(e));
+                        return ProcessingResult::Error(
+                            Error::Http(e),
+                            HandshakeMachine::from_stream(stream),
+                        );
                     }
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        return ProcessingResult::Error(e, HandshakeMachine::from_stream(stream))
+                    }
                 };
 
                 debug!("Client handshake done.");
@@ -104,7 +109,7 @@ impl<S: Read + Write> HandshakeRole for ClientHandshake<S> {
                     WebSocket::from_partially_read(stream, tail, Role::Client, self.config);
                 ProcessingResult::Done((websocket, result))
             }
-        })
+        }
     }
 }
 
