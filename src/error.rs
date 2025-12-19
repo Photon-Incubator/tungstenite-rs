@@ -73,6 +73,9 @@ pub enum Error {
     #[error("HTTP format error: {0}")]
     #[cfg(feature = "handshake")]
     HttpFormat(#[from] http::Error),
+    /// Not a websocket uri.
+    #[error("Not a websocket uri")]
+    Routing(crate::handshake::server::Request),
 }
 
 impl From<str::Utf8Error> for Error {

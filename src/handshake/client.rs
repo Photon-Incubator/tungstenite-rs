@@ -97,10 +97,15 @@ impl<S: Read + Write> HandshakeRole for ClientHandshake<S> {
                         return ProcessingResult::Error(
                             Error::Http(e),
                             HandshakeMachine::from_stream(stream),
+                            Default::default(),
                         );
                     }
                     Err(e) => {
-                        return ProcessingResult::Error(e, HandshakeMachine::from_stream(stream))
+                        return ProcessingResult::Error(
+                            e,
+                            HandshakeMachine::from_stream(stream),
+                            tail,
+                        )
                     }
                 };
 

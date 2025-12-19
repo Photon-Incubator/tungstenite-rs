@@ -125,13 +125,13 @@ impl TryParse for Request {
 
 impl<'h, 'b: 'h> FromHttparse<httparse::Request<'h, 'b>> for Request {
     fn from_httparse(raw: httparse::Request<'h, 'b>) -> Result<Self> {
-        if raw.method.expect("Bug: no method in header") != "GET" {
-            return Err(Error::Protocol(ProtocolError::WrongHttpMethod));
-        }
+        // if raw.method.expect("Bug: no method in header") != "GET" {
+        //     return Err(Error::Protocol(ProtocolError::WrongHttpMethod));
+        // }
 
-        if raw.version.expect("Bug: no HTTP version") < /*1.*/1 {
-            return Err(Error::Protocol(ProtocolError::WrongHttpVersion));
-        }
+        // if raw.version.expect("Bug: no HTTP version") < /*1.*/1 {
+        //     return Err(Error::Protocol(ProtocolError::WrongHttpVersion));
+        // }
 
         let headers = HeaderMap::from_httparse(raw.headers)?;
 
@@ -147,6 +147,15 @@ impl<'h, 'b: 'h> FromHttparse<httparse::Request<'h, 'b>> for Request {
     }
 }
 
+/// Callback on_parse() call result.
+#[derive(Copy, Clone, Debug)]
+pub enum CallbackOnParseResult {
+    /// Ok
+    Ok,
+    /// Not a websocket uri.
+    Routing,
+}
+
 /// The callback trait.
 ///
 /// The callback is called when the server receives an incoming WebSocket
@@ -154,6 +163,8 @@ impl<'h, 'b: 'h> FromHttparse<httparse::Request<'h, 'b>> for Request {
 /// and add additional headers to the response that server sends to the client and/or reject the
 /// connection based on the incoming headers.
 pub trait Callback: Sized {
+    /// Called after the request is parsed.
+    fn on_parse(&self, request: &Request) -> CallbackOnParseResult;
     /// Called whenever the server read the request from the client and is ready to reply to it.
     /// May return additional reply headers.
     /// Returning an error resulting in rejecting the incoming connection.
@@ -168,6 +179,10 @@ impl<F> Callback for F
 where
     F: FnOnce(&Request, Response) -> StdResult<Response, ErrorResponse>,
 {
+    fn on_parse(&self, _request: &Request) -> CallbackOnParseResult {
+        unimplemented!()
+    }
+
     fn on_request(
         self,
         request: &Request,
@@ -182,6 +197,10 @@ where
 pub struct NoCallback;
 
 impl Callback for NoCallback {
+    fn on_parse(&self, _request: &Request) -> CallbackOnParseResult {
+        CallbackOnParseResult::Ok
+    }
+
     fn on_request(
         self,
         _request: &Request,
@@ -237,16 +256,34 @@ impl<S: Read + Write, C: Callback> HandshakeRole for ServerHandshake<S, C> {
     ) -> ProcessingResult<Self::InternalStream, Self::FinalResult> {
         match finish {
             StageResult::DoneReading { stream, result, tail } => {
+                if let Some(callback) = &self.callback {
+                    match callback.on_parse(&result) {
+                        CallbackOnParseResult::Routing => {
+                            return ProcessingResult::Error(
+                                Error::Routing(result),
+                                HandshakeMachine::from_stream(stream),
+                                tail,
+                            )
+                        }
+                        CallbackOnParseResult::Ok => {}
+                    }
+                }
+
                 if !tail.is_empty() {
                     return ProcessingResult::Error(
                         Error::Protocol(ProtocolError::JunkAfterRequest),
                         HandshakeMachine::from_stream(stream),
+                        tail,
                     );
                 }
 
                 let response = match create_response(&result) {
                     Err(err) => {
-                        return ProcessingResult::Error(err, HandshakeMachine::from_stream(stream))
+                        return ProcessingResult::Error(
+                            err,
+                            HandshakeMachine::from_stream(stream),
+                            tail,
+                        )
                     }
                     Ok(r) => r,
                 };
@@ -263,6 +300,7 @@ impl<S: Read + Write, C: Callback> HandshakeRole for ServerHandshake<S, C> {
                             return ProcessingResult::Error(
                                 err,
                                 HandshakeMachine::from_stream(stream),
+                                tail,
                             );
                         }
                         ProcessingResult::Continue(HandshakeMachine::start_write(stream, output))
@@ -273,6 +311,7 @@ impl<S: Read + Write, C: Callback> HandshakeRole for ServerHandshake<S, C> {
                             return ProcessingResult::Error(
                                 Error::Protocol(ProtocolError::CustomResponseSuccessful),
                                 HandshakeMachine::from_stream(stream),
+                                tail,
                             );
                         }
 
@@ -284,6 +323,7 @@ impl<S: Read + Write, C: Callback> HandshakeRole for ServerHandshake<S, C> {
                             return ProcessingResult::Error(
                                 err,
                                 HandshakeMachine::from_stream(stream),
+                                tail,
                             );
                         }
 
@@ -305,6 +345,7 @@ impl<S: Read + Write, C: Callback> HandshakeRole for ServerHandshake<S, C> {
                     return ProcessingResult::Error(
                         Error::Http(http::Response::from_parts(parts, body).into()),
                         HandshakeMachine::from_stream(stream),
+                        Default::default(),
                     );
                 } else {
                     debug!("Server handshake done.");
