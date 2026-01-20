@@ -73,7 +73,7 @@ pub fn connect_with_config<Req: IntoClientRequest>(
         let client = crate::tls::client_tls_with_config(request, stream, config, None);
 
         client.map_err(|e| match e {
-            ClientError::HandshakeError(HandshakeError::Failure(f, _)) => f,
+            ClientError::HandshakeError(HandshakeError::Failure(f, _, _)) => f,
             ClientError::HandshakeError(HandshakeError::Interrupted(_)) => {
                 panic!("Bug: blocking handshake not blocked")
             }

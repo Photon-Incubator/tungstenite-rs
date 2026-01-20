@@ -9,7 +9,7 @@ use tungstenite::{accept, handshake::HandshakeRole, Error, HandshakeError, Messa
 fn must_not_block<Role: HandshakeRole>(err: HandshakeError<Role>) -> Error {
     match err {
         HandshakeError::Interrupted(_) => panic!("Bug: blocking socket would block"),
-        HandshakeError::Failure(f, _) => f,
+        HandshakeError::Failure(f, _, _) => f,
     }
 }
 

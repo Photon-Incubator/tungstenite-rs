@@ -207,7 +207,7 @@ impl FrameCodec {
             }
         };
 
-        let (mut header, length) = self.header.take().expect("Bug: no frame header");
+        let (mut header, length) = self.header.take().unwrap(); // never None, see payload =
         debug_assert_eq!(payload.len() as u64, length);
 
         if unmask {
@@ -257,7 +257,7 @@ impl FrameCodec {
         trace!("writing frame {frame}");
 
         self.out_buffer.reserve(frame.len());
-        frame.format_into_buf(&mut self.out_buffer).expect("Bug: can't write to vector");
+        frame.format_into_buf(&mut self.out_buffer)?;
 
         if self.out_buffer.len() > self.out_buffer_write_len {
             self.write_out_buffer(stream)

@@ -73,6 +73,9 @@ pub enum Error {
     #[error("HTTP format error: {0}")]
     #[cfg(feature = "handshake")]
     HttpFormat(#[from] http::Error),
+    /// Not a websocket uri.
+    #[error("Not a websocket uri")]
+    Routing(crate::handshake::server::Request),
 }
 
 impl From<str::Utf8Error> for Error {
@@ -171,7 +174,7 @@ pub enum SubProtocolError {
 #[derive(Error, Debug, PartialEq, Eq, Clone)]
 pub enum ProtocolError {
     /// Use of the wrong HTTP method (the WebSocket protocol requires the GET method be used).
-    #[error("Unsupported HTTP method used - only GET is allowed")]
+    #[error("Unsupported or missing HTTP method")]
     WrongHttpMethod,
     /// Wrong HTTP version used (the WebSocket protocol requires version 1.1 or higher).
     #[error("HTTP version must be 1.1 or higher")]
