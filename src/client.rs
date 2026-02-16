@@ -17,7 +17,7 @@ use crate::{
 
 use crate::{
     error::{Error, Result, UrlError},
-    handshake::{client::ClientHandshake, HandshakeError},
+    handshake::{client::client_handshake_start_verify, client::ClientHandshake, HandshakeError},
     protocol::WebSocket,
     stream::{Mode, NoDelay},
 };
@@ -77,7 +77,7 @@ pub fn connect_with_config<Req: IntoClientRequest>(
             ClientError::HandshakeError(HandshakeError::Interrupted(_)) => {
                 panic!("Bug: blocking handshake not blocked")
             }
-            ClientError::WebSocketError(err) => err,
+            ClientError::WebSocketError(err, _) => err,
         })
     }
 
@@ -158,7 +158,7 @@ pub enum ClientError<Stream: Read + Write> {
     /// Handshake error
     HandshakeError(HandshakeError<ClientHandshake<Stream>>),
     /// WebSocket error
-    WebSocketError(Error),
+    WebSocketError(Error, Stream),
 }
 
 /// Do the client handshake over the given stream given a web socket configuration. Passing `None`
@@ -176,14 +176,20 @@ where
     Stream: Read + Write,
     Req: IntoClientRequest,
 {
-    Ok(ClientHandshake::start(
-        stream,
-        request.into_client_request().map_err(|e| ClientError::WebSocketError(e))?,
-        config,
-    )
-    .map_err(|e| ClientError::WebSocketError(e))?
-    .handshake()
-    .map_err(|e| ClientError::HandshakeError(e))?)
+    let client_request = match request.into_client_request() {
+        Ok(r) => r,
+        Err(e) => return Err(ClientError::WebSocketError(e, stream)),
+    };
+
+    // handle ClientError::WebSocketError while stream is not moved
+    match client_handshake_start_verify(client_request) {
+        Ok((subprotocols, request, key)) => {
+            Ok(ClientHandshake::start(stream, subprotocols, request, key, config)
+                .handshake()
+                .map_err(|e| ClientError::HandshakeError(e))?)
+        }
+        Err(e) => Err(ClientError::WebSocketError(e, stream)),
+    }
 }
 
 /// Do the client handshake over the given stream.

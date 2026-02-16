@@ -37,30 +37,39 @@ pub struct ClientHandshake<S> {
     _marker: PhantomData<S>,
 }
 
+/// Extracted from ClientHandshake::start() to handle ClientError::WebSocketError while stream is not moved to start().
+pub fn client_handshake_start_verify(
+    request: Request,
+) -> Result<(Option<Vec<String>>, Vec<u8>, String)> {
+    if request.method() != http::Method::GET {
+        return Err(Error::Protocol(ProtocolError::WrongHttpMethod));
+    }
+
+    if request.version() < http::Version::HTTP_11 {
+        return Err(Error::Protocol(ProtocolError::WrongHttpVersion));
+    }
+
+    // Check the URI scheme: only ws or wss are supported
+    let _ = crate::client::uri_mode(request.uri())?;
+
+    let subprotocols = extract_subprotocols_from_request(&request)?;
+
+    // Convert and verify the `http::Request` and turn it into the request as per RFC.
+    // Also extract the key from it (it must be present in a correct request).
+    let (request, key) = generate_request(request)?;
+
+    Ok((subprotocols, request, key))
+}
+
 impl<S: Read + Write> ClientHandshake<S> {
     /// Initiate a client handshake.
     pub fn start(
         stream: S,
-        request: Request,
+        subprotocols: Option<Vec<String>>,
+        request: Vec<u8>,
+        key: String,
         config: Option<WebSocketConfig>,
-    ) -> Result<MidHandshake<Self>> {
-        if request.method() != http::Method::GET {
-            return Err(Error::Protocol(ProtocolError::WrongHttpMethod));
-        }
-
-        if request.version() < http::Version::HTTP_11 {
-            return Err(Error::Protocol(ProtocolError::WrongHttpVersion));
-        }
-
-        // Check the URI scheme: only ws or wss are supported
-        let _ = crate::client::uri_mode(request.uri())?;
-
-        let subprotocols = extract_subprotocols_from_request(&request)?;
-
-        // Convert and verify the `http::Request` and turn it into the request as per RFC.
-        // Also extract the key from it (it must be present in a correct request).
-        let (request, key) = generate_request(request)?;
-
+    ) -> MidHandshake<Self> {
         let machine = HandshakeMachine::start_write(stream, request);
 
         let client = {
@@ -73,7 +82,7 @@ impl<S: Read + Write> ClientHandshake<S> {
         };
 
         trace!("Client handshake initiated.");
-        Ok(MidHandshake { role: client, machine })
+        MidHandshake { role: client, machine }
     }
 }
 
